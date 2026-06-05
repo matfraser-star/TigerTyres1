@@ -336,11 +336,135 @@ app.post('/api/admin/tyres/bulk-price', requireAuth, (req,res) => {
 });
 app.get('/api/admin/export/stock', requireAuth, (_,res) => {
   const tyres = getDb().prepare('SELECT * FROM tyres ORDER BY brand,model').all();
-  const header = 'ID,Brand,Model,Width,Profile,Rim,Condition,Price,Qty,Speed,Load,Warranty,Featured,Created\n';
-  const rows = tyres.map(t=>[t.id,t.brand,t.model,t.width,t.profile,t.rim,t.condition,t.price,t.qty,t.speed,t.load_index,`"${(t.warranty||'').replace(/"/g,'""')}"`,t.featured,t.created_at].join(',')).join('\n');
+  const header = 'Brand,Model,Width,Profile,Rim,Condition,Price,Qty,Speed,Load,Warranty,Featured\n';
+  const rows = tyres.map(t=>[
+    `"${(t.brand||'').replace(/"/g,'""')}"`,
+    `"${(t.model||'').replace(/"/g,'""')}"`,
+    t.width, t.profile, t.rim,
+    t.condition, t.price, t.qty, t.speed, t.load_index,
+    `"${(t.warranty||'').replace(/"/g,'""')}"`,
+    t.featured
+  ].join(',')).join('\n');
   res.setHeader('Content-Type','text/csv');
   res.setHeader('Content-Disposition','attachment; filename="tigertyres_stock.csv"');
   res.send(header+rows);
+});
+
+// CSV Import — accepts multipart/form-data with a 'csv' file field
+const csvUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5*1024*1024 } });
+app.post('/api/admin/import/stock', requireAuth, csvUpload.single('csv'), (req,res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+  const text = req.file.buffer.toString('utf8').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  if (lines.length < 2) return res.status(400).json({ error: 'File is empty or has no data rows' });
+
+  // Parse header — flexible, case-insensitive
+  const rawHeader = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/[^a-z_]/g,''));
+  const col = name => {
+    const aliases = {
+      brand:      ['brand'],
+      model:      ['model'],
+      width:      ['width','tyre_width','tyrwidth'],
+      profile:    ['profile','aspect','aspect_ratio'],
+      rim:        ['rim','rim_size','wheel','wheel_size','diameter'],
+      condition:  ['condition','cond','new_used','type'],
+      price:      ['price','sell_price','retail','retail_price','cost'],
+      qty:        ['qty','quantity','stock','in_stock','stock_qty','units'],
+      speed:      ['speed','speed_rating','speed_index'],
+      load_index: ['load','load_index','load_rating','li'],
+      description:['description','desc','notes','comment'],
+      warranty:   ['warranty','warr'],
+      featured:   ['featured','feature','highlight'],
+    };
+    for (const alias of (aliases[name] || [name])) {
+      const idx = rawHeader.indexOf(alias);
+      if (idx !== -1) return idx;
+    }
+    return -1;
+  };
+
+  // Required columns
+  const required = ['brand','model','width','profile','rim'];
+  const missing = required.filter(r => col(r) === -1);
+  if (missing.length) {
+    return res.status(400).json({
+      error: `Missing required columns: ${missing.join(', ')}`,
+      hint: 'Required: Brand, Model, Width, Profile, Rim',
+      detected_columns: rawHeader
+    });
+  }
+
+  // Parse a CSV value — handles quoted fields
+  function parseCSVLine(line) {
+    const result = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQuotes && line[i+1] === '"') { current += '"'; i++; }
+        else inQuotes = !inQuotes;
+      } else if (ch === ',' && !inQuotes) {
+        result.push(current.trim()); current = '';
+      } else {
+        current += ch;
+      }
+    }
+    result.push(current.trim());
+    return result;
+  }
+
+  const ins = getDb().prepare(`
+    INSERT INTO tyres (brand,model,width,profile,rim,condition,price,qty,speed,load_index,description,warranty,featured)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `);
+
+  const errors = [];
+  const previewed = [];
+  let imported = 0;
+  let skipped = 0;
+
+  const importFn = getDb().transaction(() => {
+    for (let i = 1; i < lines.length; i++) {
+      const parts = parseCSVLine(lines[i]);
+      const g = idx => (idx === -1 ? '' : (parts[idx] || '').trim().replace(/^"|"$/g,''));
+
+      const brand     = g(col('brand'));
+      const model     = g(col('model'));
+      const width     = parseInt(g(col('width'))) || 0;
+      const profile   = parseInt(g(col('profile'))) || 0;
+      const rim       = parseInt(g(col('rim'))) || 0;
+
+      if (!brand || !model || !width || !profile || !rim) {
+        errors.push(`Row ${i+1}: missing required value (brand="${brand}" model="${model}" size=${width}/${profile}R${rim})`);
+        skipped++;
+        continue;
+      }
+
+      const rawCond   = g(col('condition')).toLowerCase();
+      const condition = rawCond.startsWith('u') ? 'Used' : 'New';
+      const price     = parseFloat(g(col('price'))) || 0;
+      const qty       = parseInt(g(col('qty'))) || 0;
+      const speed     = g(col('speed')) || 'V';
+      const load_index= parseInt(g(col('load_index'))) || 91;
+      const description = g(col('description')) || '';
+      const warranty  = g(col('warranty')) || '';
+      const featRaw   = g(col('featured')).toLowerCase();
+      const featured  = ['1','true','yes','y'].includes(featRaw) ? 1 : 0;
+
+      ins.run(brand, model, width, profile, rim, condition, price, qty, speed, load_index, description, warranty, featured);
+      previewed.push({ brand, model, width, profile, rim, condition, price, qty });
+      imported++;
+    }
+  });
+
+  try {
+    importFn();
+    res.json({ ok: true, imported, skipped, errors: errors.slice(0, 20), rows: previewed });
+  } catch(e) {
+    res.status(500).json({ error: `Database error: ${e.message}` });
+  }
 });
 
 // ════════════════════ ADMIN — UPLOAD ══════════════════════════════════

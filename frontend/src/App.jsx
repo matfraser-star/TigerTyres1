@@ -643,16 +643,83 @@ function TyreForm({ item, onSave, onCancel, showToast }) {
   </div>
 }
 
-function StockTable({ inventory, onEdit, onDelete, onPatch }) {
+function StockTable({ inventory, onEdit, onDelete, onPatch, onRefresh }) {
   const [search,setSearch]=useState('')
+  const [importing,setImporting]=useState(false)
+  const [importResult,setImportResult]=useState(null)
+  const fileRef = React.useRef()
+
   const rows=inventory.filter(t=>{const q=search.toLowerCase();return!q||`${t.brand} ${t.model}`.toLowerCase().includes(q)})
+
+  const handleImport = async (file) => {
+    if (!file) return
+    setImporting(true)
+    setImportResult(null)
+    try {
+      const result = await api.importStock(file)
+      setImportResult(result)
+      if (result.imported > 0) onRefresh()
+    } catch(e) {
+      setImportResult({ ok:false, error: e.message })
+    } finally {
+      setImporting(false)
+      fileRef.current.value = ''
+    }
+  }
   const th={padding:'10px 12px',textAlign:'left',fontSize:9,letterSpacing:2,color:O,textTransform:'uppercase',whiteSpace:'nowrap'}
   const td={padding:'7px 10px',verticalAlign:'middle'}
   return <div>
     <div style={{display:'flex',gap:10,marginBottom:14,alignItems:'center',flexWrap:'wrap'}}>
       <input placeholder="🔍  Filter stock…" value={search} onChange={e=>setSearch(e.target.value)} style={{...inp,maxWidth:280}}/>
       <span style={{color:'#444',fontSize:11}}>💡 Click price or name to edit inline · ＋/－ for stock</span>
-      <Btn variant="secondary" onClick={api.exportStock} style={{padding:'7px 14px',fontSize:11,marginLeft:'auto'}}>📥 Export CSV</Btn>
+      <div style={{display:'flex',gap:8,marginLeft:'auto',alignItems:'center'}}>
+        {/* CSV Import */}
+        <input ref={fileRef} type="file" accept=".csv,text/csv" style={{display:'none'}} onChange={e=>handleImport(e.target.files[0])}/>
+        <Btn variant="secondary" onClick={()=>fileRef.current.click()} disabled={importing} style={{padding:'7px 14px',fontSize:11}}>
+          {importing ? '⏳ Importing…' : '📤 Import CSV'}
+        </Btn>
+        <Btn variant="secondary" onClick={api.exportStock} style={{padding:'7px 14px',fontSize:11}}>📥 Export CSV</Btn>
+      </div>
+    </div>
+
+    {/* Import result banner */}
+    {importResult && (
+      <div style={{background: importResult.ok ? '#1a2a1a' : '#2a1a1a', border:`1px solid ${importResult.ok ? '#2a5a2a' : '#5a2a2a'}`, borderRadius:6, padding:'14px 18px', marginBottom:16}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
+          <div>
+            {importResult.ok ? (
+              <>
+                <div style={{...BB, fontSize:16, letterSpacing:2, color:'#44dd88', marginBottom:6}}>
+                  ✅ IMPORT COMPLETE — {importResult.imported} tyre{importResult.imported!==1?'s':''} added
+                  {importResult.skipped > 0 && <span style={{color:'#ffaa00', marginLeft:12}}> · {importResult.skipped} skipped</span>}
+                </div>
+                {importResult.errors?.length > 0 && (
+                  <div style={{marginTop:8}}>
+                    <div style={{fontSize:11,color:'#ffaa00',marginBottom:4}}>WARNINGS:</div>
+                    {importResult.errors.map((e,i)=><div key={i} style={{fontSize:11,color:'#ff9966'}}>{e}</div>)}
+                  </div>
+                )}
+                {importResult.rows?.length > 0 && (
+                  <div style={{marginTop:10,fontSize:11,color:'#4a9'}}>
+                    Added: {importResult.rows.slice(0,5).map(r=>`${r.brand} ${r.model} ${r.width}/${r.profile}R${r.rim}`).join(' · ')}
+                    {importResult.rows.length > 5 && ` · +${importResult.rows.length-5} more`}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div style={{...BB, fontSize:16, letterSpacing:2, color:'#ff6666'}}>❌ IMPORT FAILED — {importResult.error}</div>
+            )}
+          </div>
+          <button onClick={()=>setImportResult(null)} style={{background:'transparent',border:'none',color:'#555',cursor:'pointer',fontSize:18,padding:0,marginLeft:16}}>✕</button>
+        </div>
+      </div>
+    )}
+
+    {/* CSV format hint */}
+    <div style={{background:'#1a1a1a',border:'1px solid #222',borderRadius:4,padding:'10px 14px',marginBottom:14,fontSize:12,color:'#555',lineHeight:1.7}}>
+      📋 <strong style={{color:'#888'}}>CSV Import Format:</strong> Required columns: <code style={{color:O,background:'#111',padding:'1px 5px',borderRadius:2}}>Brand, Model, Width, Profile, Rim</code>
+      &nbsp;· Optional: <code style={{color:'#888',background:'#111',padding:'1px 5px',borderRadius:2}}>Condition, Price, Qty, Speed, Load, Warranty, Featured</code>
+      &nbsp;· <span style={{color:'#44dd88',cursor:'pointer'}} onClick={api.exportStock}>Download current stock as template →</span>
     </div>
     <div style={{background:'#141414',border:'1px solid #222',borderRadius:6,overflow:'hidden'}}>
       <div style={{overflowX:'auto'}}>
@@ -1182,7 +1249,7 @@ function AdminPanel({ showToast }) {
     {tab==='stock'&&(loading?<div style={{color:'#444',textAlign:'center',padding:40}}>Loading…</div>:<>
       {showBulk&&<BulkPricePanel showToast={showToast} onDone={()=>{setShowBulk(false);load()}}/>}
       {(editMode==='add'||(editMode&&editMode.id))&&<TyreForm item={editMode==='add'?null:editMode} onSave={saveItem} onCancel={()=>setEditMode(null)} showToast={showToast}/>}
-      {!editMode&&!showBulk&&<StockTable inventory={inventory} onEdit={t=>setEditMode(t)} onDelete={t=>setDeleteTarget(t)} onPatch={patchItem}/>}
+      {!editMode&&!showBulk&&<StockTable inventory={inventory} onEdit={t=>setEditMode(t)} onDelete={t=>setDeleteTarget(t)} onPatch={patchItem} onRefresh={load}/>}
     </>)}
     {tab==='vehicles'&&<VehiclesTab showToast={showToast}/>}
     {tab==='enquiries'&&<EnquiriesTab showToast={showToast}/>}

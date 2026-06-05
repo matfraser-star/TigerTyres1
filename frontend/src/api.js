@@ -45,6 +45,10 @@ export const patchTyre   = (id,d) => req('PATCH',`/api/admin/tyres/${id}`,d);
 export const deleteTyre  = (id)   => req('DELETE',`/api/admin/tyres/${id}`);
 export const bulkPrice   = (d)    => req('POST','/api/admin/tyres/bulk-price',d);
 export const exportStock = ()     => { window.location.href=`${BASE}/api/admin/export/stock`; };
+export async function importStock(file) {
+  const fd = new FormData(); fd.append('csv', file);
+  return req('POST', '/api/admin/import/stock', fd, true);
+}
 export async function uploadImage(file) {
   const fd = new FormData(); fd.append('image',file);
   return req('POST','/api/admin/upload',fd,true);
